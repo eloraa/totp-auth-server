@@ -1,0 +1,14 @@
+{
+  "name": "authinticator-server",
+  "version": "1.0.0",
+  "description": "Go backend for Authinticator with Postgres and WebSocket support.",
+  "scripts": {
+    "start": "go run ./cmd/server/main.go",
+    "build": "go build -o app ./cmd/server/main.go",
+    "build:prod": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o bin/authinticator-server ./cmd/server/main.go",
+    "start:prod": "./app",
+    "lint": "golangci-lint run || true",
+    "migrate": "go run ./internal/db/cmd/migrate.go"
+  },
+  "license": "MIT"
+} 
