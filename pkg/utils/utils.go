@@ -3,21 +3,20 @@ package utils
 import (
 	"authinticator/internal/otpauthpb"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base32"
 	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
-
-	"encoding/base32"
-
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"errors"
-	"io"
 
 	"github.com/pquerna/otp/totp"
 	"google.golang.org/protobuf/proto"
@@ -132,19 +131,40 @@ func ExtractServiceNamesFromMigrationURL(urlStr string) ([]string, error) {
 	return services, nil
 }
 
-// ExtractServiceNameFromKey extracts the service name (issuer) from an otpauth URL, or returns empty string if not found.
 func ExtractServiceNameFromKey(key string) string {
 	key = strings.TrimSpace(key)
 	if strings.HasPrefix(key, "otpauth://") {
 		u, err := url.Parse(key)
 		if err == nil {
-			return u.Query().Get("issuer")
+			issuer := u.Query().Get("issuer")
+			path := u.Path
+
+			if path != "" && path != "/" {
+				pathParts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+				if len(pathParts) >= 2 {
+					servicePart := pathParts[1]
+					if strings.Contains(servicePart, ":") {
+						parts := strings.SplitN(servicePart, ":", 2)
+						if len(parts) >= 2 {
+							service := parts[0]
+							if issuer != "" && issuer != service {
+								return fmt.Sprintf("%s (%s)", service, issuer)
+							}
+							return service
+						}
+					}
+					return pathParts[1]
+				}
+			}
+
+			if issuer != "" {
+				return issuer
+			}
 		}
 	}
 	return ""
 }
 
-// base32NoPadEncode encodes bytes to base32, no padding, uppercase
 func base32NoPadEncode(b []byte) string {
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
 	return enc.EncodeToString(b)

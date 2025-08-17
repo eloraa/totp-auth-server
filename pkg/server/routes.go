@@ -53,10 +53,11 @@ func (s *Server) setupRouter() *gin.Engine {
 	engine.GET("/login", s.handleLogin)
 	engine.GET("/list", s.withSession(s.handleList))
 	engine.POST("/add", s.withSession(s.handleAdd))
+	engine.PUT("/edit", s.withSession(s.handleEdit))
 	engine.GET("/ws", s.withSession(s.handleWebsocket))
 	engine.GET("/code", s.withSession(s.handleCode))
 	engine.DELETE("/delete", s.withSession(s.handleDelete))
-	engine.GET("/export", s.withSession(s.handleExport))
+	engine.POST("/export", s.withSession(s.handleExport))
 
 	return engine
 }
@@ -217,7 +218,6 @@ func (s *Server) handleAdd(c *gin.Context) {
 		c.JSON(201, gin.H{"message": "Added", "services": added})
 		return
 	}
-	// Normal single secret
 	secret := utils.ExtractTOTPSecret(req.Key)
 	service := utils.ExtractServiceNameFromKey(req.Key)
 	if !utils.ValidateTOTPSecret(secret) {
@@ -227,10 +227,17 @@ func (s *Server) handleAdd(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "Invalid TOTP secret or QR code data"})
 		return
 	}
+
+	// Use provided name or fallback to extracted service name
+	name := req.Name
+	if name == "" {
+		name = service
+	}
+
 	id := uuid.NewString()
 	_, err := s.DB.ExecContext(c.Request.Context(),
 		"INSERT INTO auth_service (id, user_id, name, key, service, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
-		id, userID, req.Name, secret, service,
+		id, userID, name, secret, service,
 	)
 	if err != nil {
 		if s.Debug {
@@ -244,6 +251,50 @@ func (s *Server) handleAdd(c *gin.Context) {
 		log.Printf("[DEBUG] Added service: %+v for user %s", req, userID)
 	}
 	c.JSON(201, gin.H{"message": "Added"})
+}
+
+func (s *Server) handleEdit(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var req struct {
+		ID   string `json:"id" binding:"required"`
+		Name string `json:"name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Invalid request body for edit: %v", err)
+		}
+		c.JSON(400, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if req.Name == "" {
+		c.JSON(400, gin.H{"error": "Name cannot be empty"})
+		return
+	}
+
+	res, err := s.DB.ExecContext(c.Request.Context(),
+		"UPDATE auth_service SET name = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3",
+		req.Name, req.ID, userID)
+	if err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Failed to update auth_service: %v", err)
+		}
+		c.JSON(500, gin.H{"error": "Failed to update service"})
+		return
+	}
+
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		c.JSON(404, gin.H{"error": "Service not found or not owned by user"})
+		return
+	}
+
+	notifyWebSocket(userID)
+	if s.Debug {
+		log.Printf("[DEBUG] Updated service %s name to '%s' for user %s", req.ID, req.Name, userID)
+	}
+
+	c.JSON(200, gin.H{"message": "Service updated successfully"})
 }
 
 func (s *Server) handleCode(c *gin.Context) {
@@ -302,74 +353,256 @@ func (s *Server) handleCode(c *gin.Context) {
 
 func (s *Server) handleDelete(c *gin.Context) {
 	userID := c.GetString("user_id")
-	id := c.Query("id")
-	if id == "" {
-		c.JSON(400, gin.H{"error": "Missing id parameter"})
-		return
-	}
-	res, err := s.DB.ExecContext(c.Request.Context(), "DELETE FROM auth_service WHERE id = $1 AND user_id = $2", id, userID)
-	if err != nil {
-		if s.Debug {
-			log.Printf("[DEBUG] Failed to delete auth_service: %v", err)
+
+	// Check if request has a body (bulk delete) or query parameters (single delete)
+	contentType := c.GetHeader("Content-Type")
+	if strings.Contains(contentType, "application/json") {
+		// Handle bulk delete with request body
+		var req struct {
+			All  bool        `json:"all"`
+			ID   interface{} `json:"id"`
+			Name interface{} `json:"name"`
 		}
-		c.JSON(500, gin.H{"error": "Failed to delete service"})
-		return
+
+		if err := c.ShouldBindJSON(&req); err != nil {
+			if s.Debug {
+				log.Printf("[DEBUG] Invalid request body for delete: %v", err)
+			}
+			c.JSON(400, gin.H{"error": "Invalid request body"})
+			return
+		}
+
+		// Build query based on request body
+		query := "DELETE FROM auth_service WHERE user_id = $1"
+		args := []interface{}{userID}
+
+		if !req.All {
+			if req.ID != nil {
+				switch v := req.ID.(type) {
+				case string:
+					if v != "" {
+						query += " AND id = $2"
+						args = append(args, v)
+					}
+				case float64:
+					idStr := fmt.Sprintf("%.0f", v)
+					query += " AND id = $2"
+					args = append(args, idStr)
+				case []interface{}:
+					if len(v) > 0 {
+						placeholders := make([]string, len(v))
+						for i := range v {
+							placeholders[i] = fmt.Sprintf("$%d", i+2)
+						}
+						query += fmt.Sprintf(" AND id IN (%s)", strings.Join(placeholders, ","))
+						args = append(args, v...)
+					}
+				default:
+					c.JSON(400, gin.H{"error": "Invalid id type. Expected string, number, or array"})
+					return
+				}
+			} else if req.Name != nil {
+				switch v := req.Name.(type) {
+				case string:
+					if v != "" {
+						query += " AND name = $2"
+						args = append(args, v)
+					}
+				case float64:
+					nameStr := fmt.Sprintf("%.0f", v)
+					query += " AND name = $2"
+					args = append(args, nameStr)
+				case []interface{}:
+					if len(v) > 0 {
+						placeholders := make([]string, len(v))
+						for i := range v {
+							placeholders[i] = fmt.Sprintf("$%d", i+2)
+						}
+						query += fmt.Sprintf(" AND name IN (%s)", strings.Join(placeholders, ","))
+						args = append(args, v...)
+					}
+				default:
+					c.JSON(400, gin.H{"error": "Invalid name type. Expected string, number, or array"})
+					return
+				}
+			} else {
+				c.JSON(400, gin.H{"error": "Missing id, name, or all parameter"})
+				return
+			}
+		}
+
+		res, err := s.DB.ExecContext(c.Request.Context(), query, args...)
+		if err != nil {
+			if s.Debug {
+				log.Printf("[DEBUG] Failed to delete auth_service: %v", err)
+			}
+			c.JSON(500, gin.H{"error": "Failed to delete services"})
+			return
+		}
+
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			c.JSON(404, gin.H{"error": "No services found or not owned by user"})
+			return
+		}
+
+		notifyWebSocket(userID)
+		if s.Debug {
+			log.Printf("[DEBUG] Deleted %d services for user %s", n, userID)
+		}
+
+		c.JSON(200, gin.H{"message": "Deleted", "count": n})
+	} else {
+		// Handle single delete with query parameters (backward compatibility)
+		id := c.Query("id")
+		if id == "" {
+			c.JSON(400, gin.H{"error": "Missing id parameter"})
+			return
+		}
+		res, err := s.DB.ExecContext(c.Request.Context(), "DELETE FROM auth_service WHERE id = $1 AND user_id = $2", id, userID)
+		if err != nil {
+			if s.Debug {
+				log.Printf("[DEBUG] Failed to delete auth_service: %v", err)
+			}
+			c.JSON(500, gin.H{"error": "Failed to delete service"})
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			c.JSON(404, gin.H{"error": "Service not found or not owned by user"})
+			return
+		}
+		notifyWebSocket(userID)
+		c.JSON(200, gin.H{"message": "Deleted"})
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		c.JSON(404, gin.H{"error": "Service not found or not owned by user"})
-		return
-	}
-	c.JSON(200, gin.H{"message": "Deleted"})
 }
 
 func (s *Server) handleExport(c *gin.Context) {
 	userID := c.GetString("user_id")
-	id := c.Query("id")
-	name := c.Query("name")
 
-	if id == "" && name == "" {
-		c.JSON(400, gin.H{"error": "Missing id or name parameter"})
+	var req struct {
+		All  bool        `json:"all"`
+		ID   interface{} `json:"id"`
+		Name interface{} `json:"name"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Invalid request body for export: %v", err)
+		}
+		c.JSON(400, gin.H{"error": "Invalid request body"})
 		return
 	}
 
 	query := "SELECT id, user_id, name, key FROM auth_service WHERE user_id = $1"
 	args := []interface{}{userID}
-	if id != "" {
-		query += " AND id = $2"
-		args = append(args, id)
-	} else if name != "" {
-		query += " AND name = $2"
-		args = append(args, name)
+
+	if !req.All {
+		if req.ID != nil {
+			switch v := req.ID.(type) {
+			case string:
+				if v != "" {
+					query += " AND id = $2"
+					args = append(args, v)
+				}
+			case float64:
+				idStr := fmt.Sprintf("%.0f", v)
+				query += " AND id = $2"
+				args = append(args, idStr)
+			case []interface{}:
+				if len(v) > 0 {
+					placeholders := make([]string, len(v))
+					for i := range v {
+						placeholders[i] = fmt.Sprintf("$%d", i+2)
+					}
+					query += fmt.Sprintf(" AND id IN (%s)", strings.Join(placeholders, ","))
+					args = append(args, v...)
+				}
+			default:
+				c.JSON(400, gin.H{"error": "Invalid id type. Expected string, number, or array"})
+				return
+			}
+		} else if req.Name != nil {
+			switch v := req.Name.(type) {
+			case string:
+				if v != "" {
+					query += " AND name = $2"
+					args = append(args, v)
+				}
+			case float64:
+				nameStr := fmt.Sprintf("%.0f", v)
+				query += " AND name = $2"
+				args = append(args, nameStr)
+			case []interface{}:
+				if len(v) > 0 {
+					placeholders := make([]string, len(v))
+					for i := range v {
+						placeholders[i] = fmt.Sprintf("$%d", i+2)
+					}
+					query += fmt.Sprintf(" AND name IN (%s)", strings.Join(placeholders, ","))
+					args = append(args, v...)
+				}
+			default:
+				c.JSON(400, gin.H{"error": "Invalid name type. Expected string, number, or array"})
+				return
+			}
+		} else {
+			c.JSON(400, gin.H{"error": "Missing id, name, or all parameter"})
+			return
+		}
 	}
 
 	rows, err := s.DB.QueryContext(c.Request.Context(), query, args...)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to fetch service"})
+		if s.Debug {
+			log.Printf("[DEBUG] Failed to fetch services for export: %v", err)
+		}
+		c.JSON(500, gin.H{"error": "Failed to fetch services"})
 		return
 	}
 	defer rows.Close()
 
 	var pairs [][2]string
+	var services []map[string]interface{}
+
 	for rows.Next() {
 		var sid, suid, sname, skey string
 		if err := rows.Scan(&sid, &suid, &sname, &skey); err != nil {
 			continue
 		}
 		pairs = append(pairs, [2]string{sname, skey})
+		services = append(services, map[string]interface{}{
+			"id":   sid,
+			"name": sname,
+		})
 	}
+
 	if len(pairs) == 0 {
-		c.JSON(404, gin.H{"error": "Service not found or not owned by user"})
+		c.JSON(404, gin.H{"error": "No services found or not owned by user"})
 		return
 	}
 
 	// Generate otpauth-migration URL
 	url, err := utils.GenerateMigrationURL(pairs)
 	if err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Failed to generate migration URL: %v", err)
+		}
 		c.JSON(500, gin.H{"error": "Failed to generate migration URL"})
 		return
 	}
-	c.JSON(200, gin.H{"migration_url": url})
+
+	response := gin.H{
+		"migration_url":  url,
+		"services_count": len(services),
+		"services":       services,
+	}
+
+	if s.Debug {
+		log.Printf("[DEBUG] Exported %d services for user %s", len(services), userID)
+	}
+
+	c.JSON(200, response)
 }
 
 func (s *Server) withSession(next gin.HandlerFunc) gin.HandlerFunc {
