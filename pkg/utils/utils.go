@@ -51,6 +51,11 @@ func GetUserIDFromToken(ctx context.Context, db *sql.DB, token string) (string, 
 	return userID, nil
 }
 
+func CreateSession(ctx context.Context, db *sql.DB, token, userID string, expiresAt time.Time) error {
+	_, err := db.ExecContext(ctx, "INSERT INTO session (token, user_id, expires_at) VALUES ($1, $2, $3)", token, userID, expiresAt)
+	return err
+}
+
 func ExtractTOTPSecret(key string) string {
 	key = strings.TrimSpace(key)
 	if strings.HasPrefix(key, "otpauth://") {

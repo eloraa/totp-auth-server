@@ -97,7 +97,16 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 	token := string(tokenBytes)
 
-	userID, err := utils.GetUserIDFromToken(c.Request.Context(), s.DB, token)
+	verifiedToken, valid := utils.VerifySignedCookie(token, s.Secret)
+	if !valid {
+		if s.Debug {
+			log.Printf("[DEBUG] Invalid signed cookie from %s", c.ClientIP())
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token signature"})
+		return
+	}
+
+	userID, err := utils.GetUserIDFromToken(c.Request.Context(), s.DB, verifiedToken)
 	if err != nil {
 		if s.Debug {
 			log.Printf("[DEBUG] Invalid token from %s: %v", c.ClientIP(), err)
