@@ -80,7 +80,13 @@ func ExtractSecretsFromMigrationURL(urlStr string) ([][2]string, error) {
 		return nil, nil
 	}
 	dataPart := strings.TrimPrefix(urlStr, prefix)
-	b, err := base64.StdEncoding.DecodeString(dataPart)
+
+	decodedData, err := url.QueryUnescape(dataPart)
+	if err != nil {
+		return nil, err
+	}
+
+	b, err := base64.StdEncoding.DecodeString(decodedData)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +110,14 @@ func ExtractServiceNamesFromMigrationURL(urlStr string) ([]string, error) {
 		return nil, nil
 	}
 	dataPart := strings.TrimPrefix(urlStr, prefix)
-	b, err := base64.StdEncoding.DecodeString(dataPart)
+
+	// URL decode the data part first
+	decodedData, err := url.QueryUnescape(dataPart)
+	if err != nil {
+		return nil, err
+	}
+
+	b, err := base64.StdEncoding.DecodeString(decodedData)
 	if err != nil {
 		return nil, err
 	}
