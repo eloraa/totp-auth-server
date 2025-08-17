@@ -5,6 +5,7 @@ import (
 	"authinticator/pkg/utils"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -115,15 +116,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	c.SetCookie(
-		"better-auth.session_token",
-		token,
-		86400,
-		"/",
-		"",
-		true,
-		true,
-	)
+	c.Header("Set-Cookie", fmt.Sprintf("better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", token))
 
 	if s.Debug {
 		log.Printf("[DEBUG] Login successful for user %s from %s", userID, c.ClientIP())
