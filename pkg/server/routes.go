@@ -4,8 +4,10 @@ import (
 	"authinticator/pkg/models"
 	"authinticator/pkg/utils"
 	"context"
+	"encoding/base64"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,6 +49,7 @@ func (s *Server) setupRouter() *gin.Engine {
 	})
 
 	engine.GET("/health", s.handleHealth)
+	engine.GET("/login", s.handleLogin)
 	engine.GET("/list", s.withSession(s.handleList))
 	engine.POST("/add", s.withSession(s.handleAdd))
 	engine.GET("/ws", s.withSession(s.handleWebsocket))
@@ -62,6 +65,62 @@ func (s *Server) handleHealth(c *gin.Context) {
 		log.Printf("[DEBUG] Health check requested from %s", c.ClientIP())
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (s *Server) handleLogin(c *gin.Context) {
+	tokenParam := c.Query("token")
+	if tokenParam == "" {
+		if s.Debug {
+			log.Printf("[DEBUG] Missing token parameter from %s", c.ClientIP())
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing token parameter"})
+		return
+	}
+
+	decodedToken, err := url.QueryUnescape(tokenParam)
+	if err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Failed to URL decode token from %s: %v", c.ClientIP(), err)
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid token encoding"})
+		return
+	}
+
+	tokenBytes, err := base64.StdEncoding.DecodeString(decodedToken)
+	if err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Failed to base64 decode token from %s: %v", c.ClientIP(), err)
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid token encoding"})
+		return
+	}
+
+	token := string(tokenBytes)
+
+	userID, err := utils.GetUserIDFromToken(c.Request.Context(), s.DB, token)
+	if err != nil {
+		if s.Debug {
+			log.Printf("[DEBUG] Invalid token from %s: %v", c.ClientIP(), err)
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	c.SetCookie(
+		"better-auth.session_token",
+		token,
+		86400,
+		"/",
+		"",
+		true,
+		true,
+	)
+
+	if s.Debug {
+		log.Printf("[DEBUG] Login successful for user %s from %s", userID, c.ClientIP())
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Login successful"})
 }
 
 func (s *Server) handleList(c *gin.Context) {
