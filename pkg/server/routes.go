@@ -117,7 +117,8 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	c.Header("Set-Cookie", fmt.Sprintf("better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", token))
+	c.Header("Set-Cookie", fmt.Sprintf("__Secure-better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", token))
+	c.Header("Add", fmt.Sprintf("Set-Cookie: better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", token))
 
 	if s.Debug {
 		log.Printf("[DEBUG] Login successful for user %s from %s", userID, c.ClientIP())
@@ -228,7 +229,6 @@ func (s *Server) handleAdd(c *gin.Context) {
 		return
 	}
 
-	// Use provided name or fallback to extracted service name
 	name := req.Name
 	if name == "" {
 		name = service
@@ -354,7 +354,6 @@ func (s *Server) handleCode(c *gin.Context) {
 func (s *Server) handleDelete(c *gin.Context) {
 	userID := c.GetString("user_id")
 
-	// Check if request has a body (bulk delete) or query parameters (single delete)
 	contentType := c.GetHeader("Content-Type")
 	if strings.Contains(contentType, "application/json") {
 		// Handle bulk delete with request body
@@ -372,7 +371,6 @@ func (s *Server) handleDelete(c *gin.Context) {
 			return
 		}
 
-		// Build query based on request body
 		query := "DELETE FROM auth_service WHERE user_id = $1"
 		args := []interface{}{userID}
 
@@ -453,7 +451,6 @@ func (s *Server) handleDelete(c *gin.Context) {
 
 		c.JSON(200, gin.H{"message": "Deleted", "count": n})
 	} else {
-		// Handle single delete with query parameters (backward compatibility)
 		id := c.Query("id")
 		if id == "" {
 			c.JSON(400, gin.H{"error": "Missing id parameter"})
@@ -607,16 +604,19 @@ func (s *Server) handleExport(c *gin.Context) {
 
 func (s *Server) withSession(next gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cookie, err := c.Request.Cookie("better-auth.session_token")
+		cookie, err := c.Request.Cookie("__Secure-better-auth.session_token")
 		if err != nil {
-			cookie, err = c.Request.Cookie("session_token")
+			cookie, err = c.Request.Cookie("better-auth.session_token")
 			if err != nil {
-				if s.Debug {
-					log.Printf("[DEBUG] Missing session token from %s", c.ClientIP())
+				cookie, err = c.Request.Cookie("session_token")
+				if err != nil {
+					if s.Debug {
+						log.Printf("[DEBUG] Missing session token from %s", c.ClientIP())
+					}
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing session token"})
+					c.Abort()
+					return
 				}
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing session token"})
-				c.Abort()
-				return
 			}
 		}
 		token, valid := utils.VerifySignedCookie(cookie.Value, s.Secret)
