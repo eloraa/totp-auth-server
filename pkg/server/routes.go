@@ -87,7 +87,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	verifiedToken, valid := utils.VerifySignedCookie(tokenParam, s.Secret)
+	verifiedToken, valid := utils.VerifySignedCookie(decodedToken, s.Secret)
 	if !valid {
 		if s.Debug {
 			log.Printf("[DEBUG] Invalid signed cookie from %s", c.ClientIP())
