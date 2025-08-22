@@ -113,7 +113,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	c.Header("Set-Cookie", fmt.Sprintf("better-auth.session_token=%s; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax", verifiedToken))
+	c.Header("Set-Cookie", fmt.Sprintf("better-auth.session_token=%s; Max-Age=86400; Path=/; HttpOnly; SameSite=None; Secure", verifiedToken))
 
 	if s.Debug {
 		log.Printf("[DEBUG] Login successful for user %s from %s", userID, c.ClientIP())
