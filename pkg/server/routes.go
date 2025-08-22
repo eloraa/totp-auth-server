@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -78,16 +77,25 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	decodedToken, err := url.QueryUnescape(tokenParam)
-	if err != nil {
-		if s.Debug {
-			log.Printf("[DEBUG] Failed to URL decode token from %s: %v", c.ClientIP(), err)
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid token encoding"})
-		return
+	if s.Debug {
+		log.Printf("[DEBUG] Login attempt with token: %s", tokenParam)
 	}
 
-	verifiedToken, valid := utils.VerifySignedCookie(decodedToken, s.Secret)
+	// Extract the raw token from the query string to preserve URL encoding
+	rawToken := extractTokenFromRawQuery(c.Request.URL.RawQuery, "token")
+	if rawToken == "" {
+		rawToken = tokenParam // fallback to decoded version
+	}
+
+	if s.Debug {
+		log.Printf("[DEBUG] Raw token: %s", rawToken)
+	}
+
+	// Don't decode the token here - VerifySignedCookie handles URL decoding internally
+	verifiedToken, valid := utils.VerifySignedCookie(rawToken, s.Secret)
+	if s.Debug {
+		log.Printf("[DEBUG] VerifySignedCookie result: valid=%v, verifiedToken=%s", valid, verifiedToken)
+	}
 	if !valid {
 		if s.Debug {
 			log.Printf("[DEBUG] Invalid signed cookie from %s", c.ClientIP())
@@ -105,8 +113,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	c.Header("Set-Cookie", fmt.Sprintf("__Secure-better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", decodedToken))
-	c.Header("Add", fmt.Sprintf("Set-Cookie: better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", decodedToken))
+	c.Header("Set-Cookie", fmt.Sprintf("better-auth.session_token=%s; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax", verifiedToken))
 
 	if s.Debug {
 		log.Printf("[DEBUG] Login successful for user %s from %s", userID, c.ClientIP())
@@ -625,11 +632,28 @@ func (s *Server) withSession(next gin.HandlerFunc) gin.HandlerFunc {
 			return
 		}
 		if s.Debug {
-			log.Printf("[DEBUG] Authenticated request from %s with token %s (user_id: %s)", c.ClientIP(), token, userID)
+			log.Printf("[DEBUG] Authenticated request from %s with token %s (user_id: %s)", c.ClientIP(), cookie.Value, userID)
 		}
 		ctx := context.WithValue(c.Request.Context(), sessionTokenKey, token)
 		c.Request = c.Request.WithContext(ctx)
 		c.Set("user_id", userID)
 		next(c)
 	}
+}
+
+// extractTokenFromRawQuery extracts the raw (URL-encoded) value of a query parameter
+func extractTokenFromRawQuery(rawQuery, paramName string) string {
+	if rawQuery == "" {
+		return ""
+	}
+
+	// Parse the raw query string manually to preserve URL encoding
+	params := strings.Split(rawQuery, "&")
+	for _, param := range params {
+		if strings.HasPrefix(param, paramName+"=") {
+			value := strings.TrimPrefix(param, paramName+"=")
+			return value
+		}
+	}
+	return ""
 }
