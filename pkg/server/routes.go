@@ -4,7 +4,6 @@ import (
 	"authinticator/pkg/models"
 	"authinticator/pkg/utils"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -88,18 +87,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	tokenBytes, err := base64.StdEncoding.DecodeString(decodedToken)
-	if err != nil {
-		if s.Debug {
-			log.Printf("[DEBUG] Failed to base64 decode token from %s: %v", c.ClientIP(), err)
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid token encoding"})
-		return
-	}
-
-	token := string(tokenBytes)
-
-	verifiedToken, valid := utils.VerifySignedCookie(token, s.Secret)
+	verifiedToken, valid := utils.VerifySignedCookie(tokenParam, s.Secret)
 	if !valid {
 		if s.Debug {
 			log.Printf("[DEBUG] Invalid signed cookie from %s", c.ClientIP())
@@ -117,8 +105,8 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	c.Header("Set-Cookie", fmt.Sprintf("__Secure-better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", token))
-	c.Header("Add", fmt.Sprintf("Set-Cookie: better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", token))
+	c.Header("Set-Cookie", fmt.Sprintf("__Secure-better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", decodedToken))
+	c.Header("Add", fmt.Sprintf("Set-Cookie: better-auth.session_token=%s; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=None", decodedToken))
 
 	if s.Debug {
 		log.Printf("[DEBUG] Login successful for user %s from %s", userID, c.ClientIP())
@@ -356,7 +344,6 @@ func (s *Server) handleDelete(c *gin.Context) {
 
 	contentType := c.GetHeader("Content-Type")
 	if strings.Contains(contentType, "application/json") {
-		// Handle bulk delete with request body
 		var req struct {
 			All  bool        `json:"all"`
 			ID   interface{} `json:"id"`
